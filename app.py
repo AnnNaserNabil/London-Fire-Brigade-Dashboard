@@ -8,110 +8,158 @@ from sklearn.metrics import mean_absolute_error
 import numpy as np
 
 # Set page title and layout
-st.set_page_config(page_title="London Fire Brigade Dashboard", layout="wide")
+st.set_page_config(page_title="🚒 London Fire Brigade Dashboard", layout="wide")
 
-# Load the dataset from URL
+# Data source URL
+DATA_URL = "https://data.london.gov.uk/download/london-fire-brigade-mobilisation-records/3ff29fb5-3935-41b2-89f1-38571059237e/LFB%20Mobilisation%20data%20from%202021%20-%202024.csv"
+
+# Load and clean the dataset
 @st.cache_data
 def load_data():
-    url = "https://data.london.gov.uk/download/london-fire-brigade-mobilisation-records/3ff29fb5-3935-41b2-89f1-38571059237e/LFB%20Mobilisation%20data%20from%202021%20-%202024.csv"
-    data = pd.read_csv(url)
-    
-    # Example: Add latitude and longitude columns (replace with actual geocoding)
-    borough_coords = {
-        "Camden": (51.5290, -0.1255),
-        "Westminster": (51.4975, -0.1357),
-        "Lambeth": (51.4963, -0.1115),
-        # Add more boroughs as needed
-    }
-    data['Latitude'] = data['BoroughName'].map(lambda x: borough_coords.get(x, (None, None))[0])
-    data['Longitude'] = data['BoroughName'].map(lambda x: borough_coords.get(x, (None, None))[1])
-    data.dropna(subset=['Latitude', 'Longitude'], inplace=True)
-    
-    # Feature engineering for predictive modeling
-    data['DateAndTimeMobilised'] = pd.to_datetime(data['DateAndTimeMobilised'])
-    data['DayOfWeek'] = data['DateAndTimeMobilised'].dt.dayofweek
-    data['Month'] = data['DateAndTimeMobilised'].dt.month
-    data['HourOfCall'] = data['HourOfCall'].astype(int)
-    data = pd.get_dummies(data, columns=['BoroughName'], drop_first=True)
-    
-    return data
+    try:
+        # Load dataset
+        data = pd.read_csv(DATA_URL)
 
-# Train a predictive model
+        # Debugging: Show raw data structure
+        st.write("✅ Data loaded successfully! Preview:", data.head())
+
+        # Ensure necessary columns exist
+        required_columns = {'BoroughName', 'DateAndTimeMobilised', 'HourOfCall', 'AttendanceTimeSeconds'}
+        if not required_columns.issubset(data.columns):
+            st.error(f"⚠️ Missing required columns! Expected {required_columns}, but got {data.columns}.")
+            return pd.DataFrame()
+
+        # Convert to datetime & handle errors
+        data['DateAndTimeMobilised'] = pd.to_datetime(data['DateAndTimeMobilised'], errors='coerce')
+        data.dropna(subset=['DateAndTimeMobilised'], inplace=True)
+
+        # Convert HourOfCall to numeric
+        data['HourOfCall'] = pd.to_numeric(data['HourOfCall'], errors='coerce')
+        data.dropna(subset=['HourOfCall'], inplace=True)
+
+        # Extract additional time features
+        data['DayOfWeek'] = data['DateAndTimeMobilised'].dt.dayofweek
+        data['Month'] = data['DateAndTimeMobilised'].dt.month
+
+        # Ensure AttendanceTimeSeconds is valid
+        data.dropna(subset=['AttendanceTimeSeconds'], inplace=True)
+
+        # Add latitude and longitude (Example mapping)
+        borough_coords = {
+            "Camden": (51.5290, -0.1255),
+            "Westminster": (51.4975, -0.1357),
+            "Lambeth": (51.4963, -0.1115),
+        }
+        data['Latitude'] = data['BoroughName'].map(lambda x: borough_coords.get(x, (None, None))[0])
+        data['Longitude'] = data['BoroughName'].map(lambda x: borough_coords.get(x, (None, None))[1])
+        data.dropna(subset=['Latitude', 'Longitude'], inplace=True)
+
+        # One-hot encode BoroughName
+        data = pd.get_dummies(data, columns=['BoroughName'], drop_first=True)
+
+        return data
+
+    except Exception as e:
+        st.error(f"❌ Error loading data: {e}")
+        return pd.DataFrame()
+
+# Train the predictive model
 @st.cache_data
 def train_model(data):
     features = ['DayOfWeek', 'Month', 'HourOfCall'] + [col for col in data.columns if 'BoroughName_' in col]
     target = 'AttendanceTimeSeconds'
-    
+
+    # Ensure we have enough data
+    if data.empty or len(data) < 10:
+        st.error("⚠️ Not enough data for training. Check data loading and filtering.")
+        return None, None
+
     X_train, X_test, y_train, y_test = train_test_split(data[features], data[target], test_size=0.2, random_state=42)
-    
+
     model = RandomForestRegressor(n_estimators=100, random_state=42)
     model.fit(X_train, y_train)
-    
+
     y_pred = model.predict(X_test)
     mae = mean_absolute_error(y_test, y_pred)
-    
+
     return model, mae
 
 # Load data
 data = load_data()
 
-# Train model
-model, mae = train_model(data)
+# Train model if data is valid
+if not data.empty:
+    model, mae = train_model(data)
+else:
+    model, mae = None, None
 
-# Streamlit app
+# Streamlit App UI
 st.title("🚒 London Fire Brigade Dashboard")
 
-# Sidebar for user inputs
+# Sidebar filters
 st.sidebar.header("User Inputs")
-selected_year = st.sidebar.selectbox("Select Year", data['CalYear'].unique())
-selected_borough = st.sidebar.selectbox("Select Borough", data['BoroughName'].unique())
+if not data.empty:
+    selected_year = st.sidebar.selectbox("Select Year", sorted(data['DateAndTimeMobilised'].dt.year.unique()))
+    selected_borough = st.sidebar.selectbox("Select Borough", list(borough_coords.keys()))
 
-# Filter data based on user inputs
-filtered_data = data[(data['CalYear'] == selected_year) & (data['BoroughName'] == selected_borough)]
+    # Filter data
+    filtered_data = data[(data['DateAndTimeMobilised'].dt.year == selected_year) & 
+                         (data.get(f'BoroughName_{selected_borough}', pd.Series([0]*len(data))) == 1)]
 
-# Display filtered data
-st.header("Filtered Data")
-st.write(filtered_data)
+    # Show filtered data
+    st.header("📊 Filtered Data")
+    st.write(filtered_data)
 
-# Geospatial Analysis: Map incidents
-st.header("📌 Incident Map")
-london_map = folium.Map(location=[51.5074, -0.1278], zoom_start=12)
-HeatMap(filtered_data[['Latitude', 'Longitude']].values.tolist(), radius=15).add_to(london_map)
-folium_static(london_map)
+    # Geospatial Visualization
+    st.header("📌 Incident Map")
+    london_map = folium.Map(location=[51.5074, -0.1278], zoom_start=12)
+    
+    if not filtered_data.empty:
+        from folium.plugins import HeatMap
+        HeatMap(filtered_data[['Latitude', 'Longitude']].values.tolist(), radius=15).add_to(london_map)
 
-# Trends over time
-st.header("📈 Trends Over Time")
-hourly_counts = filtered_data['HourOfCall'].value_counts().sort_index()
-st.bar_chart(hourly_counts)
+    folium_static(london_map)
 
-# Predictive Modeling Section
-st.header("🔮 Predictive Modeling")
+    # Trends Visualization
+    st.header("📈 Trends Over Time")
+    if not filtered_data.empty:
+        hourly_counts = filtered_data['HourOfCall'].value_counts().sort_index()
+        st.bar_chart(hourly_counts)
 
-# Display model performance
-st.subheader("Model Performance")
-st.write(f"Mean Absolute Error (MAE): {mae:.2f} seconds")
+    # Predictive Modeling Section
+    st.header("🔮 Predictive Modeling")
 
-# Predict response time for user inputs
-st.subheader("Predict Response Time")
-day_of_week = st.slider("Day of Week", 0, 6, 1)
-month = st.slider("Month", 1, 12, 6)
-hour_of_call = st.slider("Hour of Call", 0, 23, 12)
+    # Model Performance
+    if model:
+        st.subheader("Model Performance")
+        st.write(f"Mean Absolute Error (MAE): {mae:.2f} seconds")
 
-# Prepare input for prediction
-input_features = {
-    'DayOfWeek': day_of_week,
-    'Month': month,
-    'HourOfCall': hour_of_call,
-}
-for col in data.columns:
-    if 'BoroughName_' in col:
-        input_features[col] = 1 if col == f'BoroughName_{selected_borough}' else 0
+        # Predict Response Time
+        st.subheader("Predict Response Time")
+        day_of_week = st.slider("Day of Week", 0, 6, 1)
+        month = st.slider("Month", 1, 12, 6)
+        hour_of_call = st.slider("Hour of Call", 0, 23, 12)
 
-input_df = pd.DataFrame([input_features])
+        # Prepare input for prediction
+        input_features = {
+            'DayOfWeek': day_of_week,
+            'Month': month,
+            'HourOfCall': hour_of_call,
+        }
+        for col in data.columns:
+            if 'BoroughName_' in col:
+                input_features[col] = 1 if col == f'BoroughName_{selected_borough}' else 0
 
-# Predict
-predicted_time = model.predict(input_df)[0]
-st.write(f"Predicted Response Time: {predicted_time:.2f} seconds")
+        input_df = pd.DataFrame([input_features])
+
+        # Predict response time
+        predicted_time = model.predict(input_df)[0]
+        st.write(f"🕒 **Predicted Response Time:** {predicted_time:.2f} seconds")
+    else:
+        st.warning("⚠️ Model not trained due to insufficient data.")
+
+else:
+    st.error("❌ No data available. Please check your dataset.")
 
 # Footer
 st.markdown("---")

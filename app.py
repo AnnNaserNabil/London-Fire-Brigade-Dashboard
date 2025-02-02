@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import folium
 import logging
 import plotly.express as px
@@ -15,46 +16,40 @@ import mlflow
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Streamlit page configuration
+# Set page title and layout
 st.set_page_config(page_title="🚒 London Fire Brigade Dashboard", layout="wide")
 
-# Data source
+# Data source URL
 DATA_URL = "https://data.london.gov.uk/download/london-fire-brigade-mobilisation-records/3ff29fb5-3935-41b2-89f1-38571059237e/LFB%20Mobilisation%20data%20from%202021%20-%202024.csv"
 
-# Load and clean the dataset
+# Load dataset from URL
 @st.cache_data
 def load_data():
     try:
-        data = pd.read_csv(DATA_URL, encoding='utf-8', low_memory=False)
-        data.columns = data.columns.str.strip()
-
+        data = pd.read_csv(DATA_URL)
+        
         # Convert datetime columns
-        datetime_cols = ['DateAndTimeMobilised', 'DateAndTimeMobile', 'DateAndTimeArrived', 
-                         'DateAndTimeLeft', 'DateAndTimeReturned']
-        for col in datetime_cols:
-            if col in data.columns:
-                data[col] = pd.to_datetime(data[col], errors='coerce')
-
-        # Convert numeric columns
-        numeric_cols = ['HourOfCall', 'TurnoutTimeSeconds', 'TravelTimeSeconds', 'AttendanceTimeSeconds', 'PumpOrder']
-        for col in numeric_cols:
-            if col in data.columns:
-                data[col] = pd.to_numeric(data[col], errors='coerce')
-
-        # Fix Latitude & Longitude issue
+        data['DateAndTimeMobilised'] = pd.to_datetime(data['DateAndTimeMobilised'], errors='coerce')
+        
+        # Drop rows with missing critical values
+        data.dropna(subset=['AttendanceTimeSeconds', 'BoroughName', 'HourOfCall'], inplace=True)
+        
+        # Feature engineering
+        data['DayOfWeek'] = data['DateAndTimeMobilised'].dt.dayofweek
+        data['Month'] = data['DateAndTimeMobilised'].dt.month
+        data['HourOfCall'] = data['HourOfCall'].astype(int)
+        
+        # One-hot encoding for BoroughName
+        data = pd.get_dummies(data, columns=['BoroughName'], drop_first=True)
+        
+        # Clean Latitude and Longitude columns
         if 'Latitude' in data.columns and 'Longitude' in data.columns:
+            # Convert Latitude and Longitude to numeric, coercing errors into NaN
             data['Latitude'] = pd.to_numeric(data['Latitude'], errors='coerce')
             data['Longitude'] = pd.to_numeric(data['Longitude'], errors='coerce')
+            
+            # Drop rows with NaN values in Latitude or Longitude
             data.dropna(subset=['Latitude', 'Longitude'], inplace=True)
-
-        # Extract features
-        if 'DateAndTimeMobilised' in data.columns:
-            data['DayOfWeek'] = data['DateAndTimeMobilised'].dt.dayofweek
-            data['Month'] = data['DateAndTimeMobilised'].dt.month
-
-        # One-hot encode BoroughName (if present)
-        if 'BoroughName' in data.columns:
-            data = pd.get_dummies(data, columns=['BoroughName'], drop_first=True)
 
         return data
     except Exception as e:
@@ -73,27 +68,22 @@ if not data.empty:
     selected_year = st.sidebar.selectbox("Select Year", data['CalYear'].unique())
     selected_borough = st.sidebar.selectbox("Select Borough", [col.replace("BoroughName_", "") for col in data.columns if "BoroughName_" in col])
 
-    # Filter data
+    # Filter data based on user inputs
     filtered_data = data[(data['CalYear'] == selected_year) & (data[f'BoroughName_{selected_borough}'] == 1)]
 
     # Display filtered data
     st.header("Filtered Data")
     st.write(filtered_data)
 
-# Geospatial Analysis
-st.header("📌 Incident Map")
-if 'Latitude' in filtered_data.columns and 'Longitude' in filtered_data.columns:
-    # Check if there are missing values in Latitude or Longitude
+    # Geospatial Analysis (Heatmap)
+    st.header("📌 Incident Map")
     if not filtered_data[['Latitude', 'Longitude']].isnull().values.any():
         london_map = folium.Map(location=[51.5074, -0.1278], zoom_start=12)
         HeatMap(filtered_data[['Latitude', 'Longitude']].values.tolist(), radius=15).add_to(london_map)
         folium_static(london_map)
     else:
         st.warning("⚠️ Some incidents have missing geospatial data and will not be displayed on the map.")
-else:
-    st.error("❌ Latitude and Longitude columns are missing from the data.")
-
-
+    
     # Trends over time
     st.header("📈 Trends Over Time")
     st.bar_chart(filtered_data['HourOfCall'].value_counts().sort_index())
@@ -104,7 +94,7 @@ else:
         features = ['DayOfWeek', 'Month', 'HourOfCall'] + [col for col in data.columns if 'BoroughName_' in col]
         target = 'AttendanceTimeSeconds'
         X_train, X_test, y_train, y_test = train_test_split(data[features], data[target], test_size=0.2, random_state=42)
-
+        
         # Hyperparameter tuning
         param_grid = {
             'n_estimators': [50, 100, 200],
@@ -112,15 +102,15 @@ else:
             'min_samples_split': [2, 5, 10],
             'min_samples_leaf': [1, 2, 4]
         }
-
+        
         model = RandomForestRegressor(random_state=42)
         search = RandomizedSearchCV(model, param_grid, n_iter=10, scoring='neg_mean_absolute_error', cv=3, random_state=42)
         search.fit(X_train, y_train)
-
+        
         best_model = search.best_estimator_
         y_pred = best_model.predict(X_test)
         mae = mean_absolute_error(y_test, y_pred)
-
+        
         return best_model, mae, X_train
 
     # Train the model

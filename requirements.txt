@@ -3,3 +3,7 @@ streamlit-folium
 scikit-learn
 pandas
 numpy
+logging
+plotly
+shap
+mlflow

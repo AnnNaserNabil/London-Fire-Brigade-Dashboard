@@ -5,7 +5,6 @@ from streamlit_folium import folium_static
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_absolute_error
-import numpy as np
 
 # Streamlit page configuration
 st.set_page_config(page_title="🚒 London Fire Brigade Dashboard", layout="wide")
@@ -17,117 +16,66 @@ DATA_URL = "https://data.london.gov.uk/download/london-fire-brigade-mobilisation
 @st.cache_data
 def load_data():
     try:
-        data = pd.read_csv(DATA_URL)
-
-        # Debugging: Check if data is actually loaded
-        if data.empty or data.isnull().all().all():
-            st.error("❌ Data is empty! Check the dataset source or file format.")
-            return pd.DataFrame()
-
+        data = pd.read_csv(DATA_URL, encoding='utf-8', low_memory=False)
+        data.columns = data.columns.str.strip()
+        
         # Convert datetime columns
         datetime_cols = ['DateAndTimeMobilised', 'DateAndTimeMobile', 'DateAndTimeArrived', 
                          'DateAndTimeLeft', 'DateAndTimeReturned']
         for col in datetime_cols:
-            data[col] = pd.to_datetime(data[col], errors='coerce')
+            if col in data.columns:
+                data[col] = pd.to_datetime(data[col], errors='coerce')
 
         # Convert numeric columns
         numeric_cols = ['HourOfCall', 'TurnoutTimeSeconds', 'TravelTimeSeconds', 'AttendanceTimeSeconds', 'PumpOrder']
         for col in numeric_cols:
-            data[col] = pd.to_numeric(data[col], errors='coerce')
+            if col in data.columns:
+                data[col] = pd.to_numeric(data[col], errors='coerce')
 
-        # Convert Latitude & Longitude
-        data['Latitude'] = pd.to_numeric(data['Latitude'], errors='coerce')
-        data['Longitude'] = pd.to_numeric(data['Longitude'], errors='coerce')
-        data.dropna(subset=['Latitude', 'Longitude'], inplace=True)
+        # Fix Latitude & Longitude issue
+        if 'Latitude' in data.columns and 'Longitude' in data.columns:
+            data['Latitude'] = pd.to_numeric(data['Latitude'], errors='coerce')
+            data['Longitude'] = pd.to_numeric(data['Longitude'], errors='coerce')
+            data.dropna(subset=['Latitude', 'Longitude'], inplace=True)
 
         # Extract features
-        data['DayOfWeek'] = data['DateAndTimeMobilised'].dt.dayofweek
-        data['Month'] = data['DateAndTimeMobilised'].dt.month
+        if 'DateAndTimeMobilised' in data.columns:
+            data['DayOfWeek'] = data['DateAndTimeMobilised'].dt.dayofweek
+            data['Month'] = data['DateAndTimeMobilised'].dt.month
 
-        # One-hot encode BoroughName
-        data = pd.get_dummies(data, columns=['BoroughName'], drop_first=True)
+        # One-hot encode BoroughName (if present)
+        if 'BoroughName' in data.columns:
+            data = pd.get_dummies(data, columns=['BoroughName'], drop_first=True)
 
         return data
-
     except Exception as e:
         st.error(f"❌ Error loading data: {e}")
         return pd.DataFrame()
 
-# Train predictive model
+# Train ML model
 @st.cache_data
 def train_model(data):
-    features = ['DayOfWeek', 'Month', 'HourOfCall'] + [col for col in data.columns if 'BoroughName_' in col]
-    target = 'AttendanceTimeSeconds'
-
-    if data.empty or data[target].isnull().all():
-        st.error("⚠️ No valid data for training. Ensure dataset contains AttendanceTimeSeconds.")
+    features = ['HourOfCall', 'TurnoutTimeSeconds', 'TravelTimeSeconds', 'AttendanceTimeSeconds', 'DayOfWeek', 'Month']
+    target = 'PumpOrder'
+    if target not in data.columns:
         return None, None
 
+    data = data.dropna(subset=features + [target])
     X_train, X_test, y_train, y_test = train_test_split(data[features], data[target], test_size=0.2, random_state=42)
-
     model = RandomForestRegressor(n_estimators=100, random_state=42)
     model.fit(X_train, y_train)
-
-    y_pred = model.predict(X_test)
-    mae = mean_absolute_error(y_test, y_pred)
-
+    predictions = model.predict(X_test)
+    mae = mean_absolute_error(y_test, predictions)
     return model, mae
 
-# Load data
+# Load and preprocess data
 data = load_data()
 
-# Train model if data is valid
 if not data.empty:
+    st.success("✅ Data loaded successfully!")
+    st.write(data.head())
     model, mae = train_model(data)
-else:
-    model, mae = None, None
-
-# Streamlit UI
-st.title("🚒 London Fire Brigade Dashboard")
-
-# Sidebar filters
-st.sidebar.header("User Inputs")
-if not data.empty:
-    selected_year = st.sidebar.selectbox("Select Year", sorted(data['DateAndTimeMobilised'].dt.year.unique()))
-    selected_hour = st.sidebar.slider("Select Hour", 0, 23, 12)
-
-    # Filter data
-    filtered_data = data[(data['DateAndTimeMobilised'].dt.year == selected_year) &
-                         (data['HourOfCall'] == selected_hour)]
-
-    st.header("📊 Filtered Data")
-    st.write(filtered_data)
-
-    # Geospatial Visualization
-    st.header("📌 Incident Map")
-    london_map = folium.Map(location=[51.5074, -0.1278], zoom_start=10)
-
-    if not filtered_data.empty:
-        from folium.plugins import HeatMap
-        HeatMap(filtered_data[['Latitude', 'Longitude']].values.tolist(), radius=10).add_to(london_map)
-
-    folium_static(london_map)
-
-    # Predictive Model
-    st.header("🔮 Predict Response Time")
     if model:
-        st.write(f"Mean Absolute Error: {mae:.2f} sec")
-        day_of_week = st.slider("Day of Week", 0, 6, 1)
-        month = st.slider("Month", 1, 12, 6)
-        hour = st.slider("Hour", 0, 23, 12)
-
-        input_data = {
-            'DayOfWeek': day_of_week,
-            'Month': month,
-            'HourOfCall': hour,
-        }
-        input_df = pd.DataFrame([input_data])
-
-        predicted_time = model.predict(input_df)[0]
-        st.write(f"Predicted Response Time: {predicted_time:.2f} sec")
-
+        st.success(f"✅ Model trained! Mean Absolute Error: {mae:.2f}")
 else:
     st.error("❌ No valid data available.")
-
-st.markdown("---")
-st.markdown("Built with ❤️ using Streamlit")

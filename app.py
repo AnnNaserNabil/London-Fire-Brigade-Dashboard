@@ -12,23 +12,24 @@ from sklearn.metrics import mean_absolute_error
 import shap
 import mlflow
 
-# Configure logging
+# Set up logging configuration
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Set page title and layout
-st.set_page_config(page_title="🚒 London Fire Brigade Dashboard", layout="wide")
+# Streamlit page configuration
+st.set_page_config(page_title="London Fire Brigade Dashboard", layout="wide")
 
 # Data source URL
 DATA_URL = "https://data.london.gov.uk/download/london-fire-brigade-mobilisation-records/3ff29fb5-3935-41b2-89f1-38571059237e/LFB%20Mobilisation%20data%20from%202021%20-%202024.csv"
 
-# Load dataset from URL
+# Function to load and preprocess the data
 @st.cache_data
-def load_data():
+def load_and_preprocess_data():
     try:
+        # Load dataset
         data = pd.read_csv(DATA_URL)
         
-        # Convert datetime columns
+        # Convert date columns to datetime
         data['DateAndTimeMobilised'] = pd.to_datetime(data['DateAndTimeMobilised'], errors='coerce')
         
         # Drop rows with missing critical values
@@ -42,60 +43,64 @@ def load_data():
         # One-hot encoding for BoroughName
         data = pd.get_dummies(data, columns=['BoroughName'], drop_first=True)
         
-        # Clean Latitude and Longitude columns
+        # Convert Latitude and Longitude to numeric and drop invalid entries
         if 'Latitude' in data.columns and 'Longitude' in data.columns:
-            # Convert Latitude and Longitude to numeric, coercing errors into NaN
             data['Latitude'] = pd.to_numeric(data['Latitude'], errors='coerce')
             data['Longitude'] = pd.to_numeric(data['Longitude'], errors='coerce')
-            
-            # Drop rows with NaN values in Latitude or Longitude
             data.dropna(subset=['Latitude', 'Longitude'], inplace=True)
 
         return data
     except Exception as e:
-        st.error(f"❌ Error loading data: {e}")
+        st.error(f"Error loading and processing data: {e}")
+        logger.error(f"Data loading error: {e}")
         return pd.DataFrame()
 
-# Load data
-data = load_data()
+# Load the data
+data = load_and_preprocess_data()
 
+# Ensure data is available
 if not data.empty:
-    st.success("✅ Data loaded successfully!")
+    st.success("Data loaded successfully!")
+
+    # Display dataset preview
+    st.header("Data Overview")
     st.write(data.head())
 
-    # Sidebar filters
-    st.sidebar.header("User Inputs")
+    # Sidebar for user input
+    st.sidebar.header("Filters")
     selected_year = st.sidebar.selectbox("Select Year", data['CalYear'].unique())
     selected_borough = st.sidebar.selectbox("Select Borough", [col.replace("BoroughName_", "") for col in data.columns if "BoroughName_" in col])
 
-    # Filter data based on user inputs
+    # Filter data based on user input
     filtered_data = data[(data['CalYear'] == selected_year) & (data[f'BoroughName_{selected_borough}'] == 1)]
 
     # Display filtered data
     st.header("Filtered Data")
     st.write(filtered_data)
 
-    # Geospatial Analysis (Heatmap)
-    st.header("📌 Incident Map")
+    # Geospatial Visualization - Heatmap
+    st.header("Incident Map")
     if not filtered_data[['Latitude', 'Longitude']].isnull().values.any():
         london_map = folium.Map(location=[51.5074, -0.1278], zoom_start=12)
         HeatMap(filtered_data[['Latitude', 'Longitude']].values.tolist(), radius=15).add_to(london_map)
         folium_static(london_map)
     else:
-        st.warning("⚠️ Some incidents have missing geospatial data and will not be displayed on the map.")
-    
-    # Trends over time
-    st.header("📈 Trends Over Time")
+        st.warning("Some incidents have missing geospatial data and will not be displayed on the map.")
+
+    # Trend Analysis - Hour of Call
+    st.header("Trends Over Time")
     st.bar_chart(filtered_data['HourOfCall'].value_counts().sort_index())
 
-    # Train predictive model with hyperparameter tuning
+    # Model Training and Hyperparameter Tuning
     @st.cache_data
-    def train_model(data):
+    def train_predictive_model(data):
         features = ['DayOfWeek', 'Month', 'HourOfCall'] + [col for col in data.columns if 'BoroughName_' in col]
         target = 'AttendanceTimeSeconds'
+        
+        # Split data into training and testing sets
         X_train, X_test, y_train, y_test = train_test_split(data[features], data[target], test_size=0.2, random_state=42)
         
-        # Hyperparameter tuning
+        # Hyperparameter tuning using RandomizedSearchCV
         param_grid = {
             'n_estimators': [50, 100, 200],
             'max_depth': [None, 10, 20],
@@ -103,6 +108,7 @@ if not data.empty:
             'min_samples_leaf': [1, 2, 4]
         }
         
+        # Initialize and train the RandomForestRegressor model
         model = RandomForestRegressor(random_state=42)
         search = RandomizedSearchCV(model, param_grid, n_iter=10, scoring='neg_mean_absolute_error', cv=3, random_state=42)
         search.fit(X_train, y_train)
@@ -113,19 +119,20 @@ if not data.empty:
         
         return best_model, mae, X_train
 
-    # Train the model
-    model, mae, X_train = train_model(data)
-    st.success(f"✅ Model trained! Mean Absolute Error: {mae:.2f} seconds")
+    # Train the model and evaluate performance
+    model, mae, X_train = train_predictive_model(data)
+    st.success(f"Model trained successfully! Mean Absolute Error: {mae:.2f} seconds")
 
-    # Explain model predictions
+    # SHAP Feature Importance Visualization
     explainer = shap.Explainer(model, X_train)
     shap_values = explainer(X_train)
 
-    st.header("🔍 Feature Importance")
-    fig = px.bar(pd.DataFrame({'Feature': X_train.columns, 'Importance': model.feature_importances_}).sort_values(by='Importance', ascending=False), x='Feature', y='Importance')
+    st.header("Feature Importance")
+    feature_importance = pd.DataFrame({'Feature': X_train.columns, 'Importance': model.feature_importances_}).sort_values(by='Importance', ascending=False)
+    fig = px.bar(feature_importance, x='Feature', y='Importance')
     st.plotly_chart(fig)
 
-    # Predict response time
+    # User Input for Response Time Prediction
     st.subheader("Predict Response Time")
     day_of_week = st.slider("Day of Week", 0, 6, 1)
     month = st.slider("Month", 1, 12, 6)
@@ -140,13 +147,13 @@ if not data.empty:
     predicted_time = model.predict(input_df)[0]
     st.write(f"Predicted Response Time: {predicted_time:.2f} seconds")
 
-    # Logging model performance
+    # Log model performance using MLflow
     mlflow.log_metric("MAE", mae)
-    st.success("📊 Model performance logged with MLflow!")
+    st.success("Model performance logged with MLflow.")
 
 else:
-    st.error("❌ No valid data available.")
+    st.error("Failed to load or process the data.")
 
 # Footer
 st.markdown("---")
-st.markdown("Built with ❤️ using Streamlit")
+st.markdown("Built with ❤️ by the London Fire Brigade Data Team | Powered by Streamlit")

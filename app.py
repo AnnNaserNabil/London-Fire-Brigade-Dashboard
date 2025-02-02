@@ -78,6 +78,20 @@ if not data.empty:
     st.header("Filtered Data")
     st.write(filtered_data)
 
+# Check if 'Latitude' and 'Longitude' columns exist in the filtered data
+if 'Latitude' in filtered_data.columns and 'Longitude' in filtered_data.columns:
+    # Check if there are missing values in these columns
+    if not filtered_data[['Latitude', 'Longitude']].isnull().values.any():
+        london_map = folium.Map(location=[51.5074, -0.1278], zoom_start=12)
+        HeatMap(filtered_data[['Latitude', 'Longitude']].values.tolist(), radius=15).add_to(london_map)
+        folium_static(london_map)
+    else:
+        st.warning("Some incidents have missing geospatial data and will not be displayed on the map.")
+else:
+    st.error("Missing 'Latitude' or 'Longitude' columns in the data.")
+
+
+    
     # Geospatial Visualization - Heatmap
     st.header("Incident Map")
     if not filtered_data[['Latitude', 'Longitude']].isnull().values.any():
